@@ -13,7 +13,7 @@ def transcribe_with_whisper(audio_bytes):
         "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "audio/wav"
     }
-    # Конвертируем в WAV (Whisper требует WAV)
+    # Конвертируем из OGG (Telegram) в WAV (Whisper)
     audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="ogg")
     wav_io = io.BytesIO()
     audio.export(wav_io, format="wav")
@@ -56,13 +56,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         voice = await update.message.voice.get_file()
         voice_bytes = await voice.download_as_bytearray()
-
-        # Распознавание
         user_text = transcribe_with_whisper(voice_bytes)
         reply = generate_response(user_text)
-
         await update.message.reply_text(reply)
-
     except Exception as e:
         await update.message.reply_text("Ошибка. Попробуй позже.")
         print("Error:", e)
