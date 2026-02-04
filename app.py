@@ -1,88 +1,72 @@
 import os
 import requests
+import io
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from pydub import AudioSegment
 
-# === Настройки из переменных окружения ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-YANDEX_API_KEY = os.environ["YANDEX_API_KEY"]
-FOLDER_ID = os.environ["FOLDER_ID"]
+HF_TOKEN = os.environ["HF_TOKEN"]
 
-# === Распознавание речи (Yandex SpeechKit) ===
-def transcribe_voice(voice_bytes):
-    headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-    params = {
-        "folderId": FOLDER_ID,
-        "lang": "ru-RU",
-        "format": "oggopus",
-        "sampleRateHertz": 48000,
-    }
-    response = requests.post(
-        "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize",
-        headers=headers,
-        params=params,
-        data=voice_bytes
-    )
-    result = response.json()
-    return result.get("result", "").strip()
-
-# === Генерация ответа через Yandex GPT ===
-def generate_response(user_text):
-    prompt = (
-        "Ты — добрый, мудрый и поддерживающий психолог. "
-        "Пользователь сказал: «{user_text}». "
-        "Ответь кратко (1–2 предложения), с эмпатией, мягко и без советов, если не просят. "
-        "Иногда задавай лёгкий уточняющий вопрос или напоминай о дыхании, заботе о себе. "
-        "Не используй маркдаун, только чистый текст."
-    ).format(user_text=user_text)
-
-    body = {
-        "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
-        "completionOptions": {"stream": False, "temperature": 0.6, "maxTokens": 150},
-        "messages": [{"role": "user", "text": prompt}]
-    }
-
+def transcribe_with_whisper(audio_bytes):
     headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Api-Key {YANDEX_API_KEY}"
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "audio/wav"
+    }
+    # Конвертируем в WAV (Whisper требует WAV)
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="ogg")
+    wav_io = io.BytesIO()
+    audio.export(wav_io, format="wav")
+    wav_data = wav_io.getvalue()
+
+    response = requests.post(
+        "https://api-inference.huggingface.co/models/openai/whisper-large-v3",
+        headers=headers,
+        data=wav_data
+    )
+    try:
+        return response.json().get("text", "").strip()
+    except:
+        return ""
+
+def generate_response(text):
+    if not text:
+        return "Не удалось распознать речь. Попробуй ещё раз."
+    
+    payload = {
+        "inputs": f"Пользователь сказал: '{text}'. Ответь как добрый психолог, кратко и с заботой.",
+        "parameters": {"max_new_tokens": 100}
+    }
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json"
     }
 
     response = requests.post(
-        "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
-        json=body,
-        headers=headers
+        "https://api-inference.huggingface.co/models/google/flan-t5-small",
+        headers=headers,
+        json=payload
     )
-
     try:
-        answer = response.json()["result"]["alternatives"][0]["message"]["text"]
-        return answer
+        return response.json()[0]["generated_text"].strip()
     except:
         return "Спасибо, что поделился. Ты не один — я рядом. 💙"
 
-# === Обработка голосового сообщения ===
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Скачиваем голосовое
-        voice_file = await update.message.voice.get_file()
-        voice_bytes = await voice_file.download_as_bytearray()
+        voice = await update.message.voice.get_file()
+        voice_bytes = await voice.download_as_bytearray()
 
-        # Распознаём
-        user_text = transcribe_voice(voice_bytes)
-        if not user_text:
-            await update.message.reply_text("Не удалось распознать речь. Попробуй говорить чётче.")
-            return
+        # Распознавание
+        user_text = transcribe_with_whisper(voice_bytes)
+        reply = generate_response(user_text)
 
-        # Генерируем ответ
-        ai_reply = generate_response(user_text)
-
-        # Отправляем
-        await update.message.reply_text(ai_reply)
+        await update.message.reply_text(reply)
 
     except Exception as e:
-        await update.message.reply_text("Произошла ошибка. Попробуй позже.")
-        print("Ошибка:", e)
+        await update.message.reply_text("Ошибка. Попробуй позже.")
+        print("Error:", e)
 
-# === Запуск бота ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
